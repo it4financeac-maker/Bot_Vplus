@@ -4,14 +4,18 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, JoinEvent, FileMessage
+import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 # --- ส่วนตั้งค่า (แก้ไขตรงนี้) ---
 LINE_CHANNEL_ACCESS_TOKEN = 'gQCIduqRTEeTTuGsb2Lzu1HDCYjXy/rFYTs2AJ4PqYzpTr/z0CeKH7fei7ANqatfLiDRBjcHZ6ddHp63EUx9IAz8ihbnj9RGPkO9bPI/ht54Xz8V9T4ljNnevzOilFM7WlcSg983CYXimz6Wu7WraAdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = '6193d996f3609b069c00a6f5a0741b7b'
 GOOGLE_SHEET_NAME = 'ระบบนับจำนวนเคส'
 CREDENTIALS_FILE = 'credentials.json'
+GOOGLE_DRIVE_FOLDER_ID = '15RPTjBqUvnn7dosY5NRzyQw6w3RW9l4o' # 📌 ใส่ ID โฟลเดอร์ Google Drive ของคุณ
 
 app = Flask(__name__)
 
@@ -25,6 +29,43 @@ def get_worksheet(sheet_name):
     client = gspread.authorize(creds)
     sheet = client.open(GOOGLE_SHEET_NAME)
     return sheet.worksheet(sheet_name)
+
+# --- ฟังก์ชันอัปโหลดไฟล์ไป Google Drive ---
+def upload_to_drive(file_path, file_name):
+    if GOOGLE_DRIVE_FOLDER_ID == 'ใส่_ID_โฟลเดอร์_ที่นี่' or not GOOGLE_DRIVE_FOLDER_ID:
+        print("Warning: Google Drive Folder ID is not set.")
+        if os.path.exists(file_path): os.remove(file_path)
+        return ""
+        
+    scope = ['https://www.googleapis.com/auth/drive']
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+    service = build('drive', 'v3', credentials=creds)
+
+    file_metadata = {
+        'name': file_name,
+        'parents': [GOOGLE_DRIVE_FOLDER_ID]
+    }
+    media = MediaFileUpload(file_path, mimetype='application/pdf')
+    
+    file_link = ""
+    try:
+        file = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
+        file_id = file.get('id')
+        file_link = file.get('webViewLink')
+        
+        permission = {
+            'type': 'anyone',
+            'role': 'reader',
+        }
+        service.permissions().create(fileId=file_id, body=permission).execute()
+    except Exception as e:
+        print(f"Error uploading to drive: {e}")
+    finally:
+        try:
+            if os.path.exists(file_path): os.remove(file_path)
+        except: pass
+        
+    return file_link
 
 # ==========================================
 # 🔧 ฟังก์ชันใหม่: ดึงชื่อกลุ่มจาก LINE และอัปเดตลง Sheet อัตโนมัติ
@@ -156,6 +197,7 @@ def handle_file(event):
         found_row_index = None
         current_contract_count = 0
         existing_names = []
+        links_data = {}
         
         for i, row in enumerate(all_rows[1:]): 
             if str(row[0]) == today_str and str(row[1]) == group_id:
@@ -171,6 +213,13 @@ def handle_file(event):
                     existing_names = [n.strip() for n in raw_names.split(',') if n.strip()]
                 except: existing_names = []
                 
+                # อ่าน JSON ลิงก์สัญญา (Column I -> index 8)
+                try: 
+                    raw_links = str(row[8]) if len(row) > 8 else "{}"
+                    if not raw_links.strip(): raw_links = "{}"
+                    links_data = json.loads(raw_links)
+                except: links_data = {}
+                
                 break
         
         # --- ตรวจสอบว่าชื่อนี้เคยนับไปหรือยัง (De-duplicate) ---
@@ -178,18 +227,34 @@ def handle_file(event):
             print(f"Duplicate contract ignored: {contract_name}")
             return # จบการทำงานทันที ถ้านับไปแล้ว
 
-        # ถ้ายอมให้ผ่าน (ชื่อใหม่) -> เพิ่มชื่อลง list และ +1
+        # ถ้ายอมให้ผ่าน (ชื่อใหม่) -> ดาวน์โหลดและอัปโหลดไป Drive
+        message_content = line_bot_api.get_message_content(event.message.id)
+        temp_file_path = f"{event.message.id}.pdf"
+        
+        with open(temp_file_path, 'wb') as fd:
+            for chunk in message_content.iter_content():
+                fd.write(chunk)
+                
+        # อัปโหลดและรับลิงก์
+        drive_link = upload_to_drive(temp_file_path, file_name)
+
+        # อัปเดตข้อมูล
         existing_names.append(contract_name)
         new_names_str = ",".join(existing_names)
         
+        if drive_link:
+            links_data[contract_name] = drive_link
+        new_links_str = json.dumps(links_data, ensure_ascii=False)
+        
         if found_row_index:
-            # อัปเดตแถวเดิม: Col F (Count) และ Col G (NameList)
+            # อัปเดตแถวเดิม: Col F (Count), Col G (NameList), Col I (Links JSON)
             sh.update_cell(found_row_index, 6, current_contract_count + 1)
             sh.update_cell(found_row_index, 7, new_names_str)
+            sh.update_cell(found_row_index, 9, new_links_str)
             print(f"Contract updated: {contract_name}")
         else:
-            # สร้างแถวใหม่ (เรียง: Date, ID, Shop, Approve(0), Release(0), Contract(1), NameList)
-            sh.append_row([today_str, group_id, current_shop_name, 0, 0, 1, new_names_str])
+            # สร้างแถวใหม่ (เรียง: Date, ID, Shop, Approve, Release, Contract, NameList, Note, Links JSON)
+            sh.append_row([today_str, group_id, current_shop_name, 0, 0, 1, new_names_str, "", new_links_str])
             print(f"New contract record: {contract_name}")
 
     except Exception as e:
