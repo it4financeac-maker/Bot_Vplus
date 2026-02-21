@@ -49,7 +49,7 @@ def upload_to_drive(file_path, file_name):
     
     file_link = ""
     try:
-        file = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
+        file = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink', supportsAllDrives=True).execute()
         file_id = file.get('id')
         file_link = file.get('webViewLink')
         
@@ -57,7 +57,7 @@ def upload_to_drive(file_path, file_name):
             'type': 'anyone',
             'role': 'reader',
         }
-        service.permissions().create(fileId=file_id, body=permission).execute()
+        service.permissions().create(fileId=file_id, body=permission, supportsAllDrives=True).execute()
     except Exception as e:
         print(f"Error uploading to drive: {e}")
     finally:
