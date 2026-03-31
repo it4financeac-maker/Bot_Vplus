@@ -6,6 +6,7 @@ from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, JoinEvent, FileMessage
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import re
 
 # --- ส่วนตั้งค่า (แก้ไขตรงนี้) ---
 LINE_CHANNEL_ACCESS_TOKEN = 'gQCIduqRTEeTTuGsb2Lzu1HDCYjXy/rFYTs2AJ4PqYzpTr/z0CeKH7fei7ANqatfLiDRBjcHZ6ddHp63EUx9IAz8ihbnj9RGPkO9bPI/ht54Xz8V9T4ljNnevzOilFM7WlcSg983CYXimz6Wu7WraAdB04t89/1O/w1cDnyilFU='
@@ -54,6 +55,59 @@ def sync_group_name(group_id):
     except Exception as e:
         print(f"Error syncing group name: {e}")
         return current_line_name
+
+# ==========================================
+# 🔧 ฟังก์ชันใหม่: บันทึกยอดสัญญาลง Google Sheets เพื่อลดความซ้ำซ้อน
+# ==========================================
+def record_contract_in_sheet(group_id, current_shop_name, contract_name, today_str):
+    try:
+        sh = get_worksheet('Log')
+        all_rows = sh.get_all_values()
+        
+        found_row_index = None
+        current_contract_count = 0
+        existing_names = []
+        
+        for i, row in enumerate(all_rows[1:]): 
+            if str(row[0]) == today_str and str(row[1]) == group_id:
+                found_row_index = i + 2
+                
+                # อ่านยอดสัญญาปัจจุบัน (Column F -> index 5)
+                try: current_contract_count = int(row[5]) if len(row) > 5 and row[5] else 0
+                except: current_contract_count = 0
+                
+                # อ่านรายชื่อคนที่เคยส่งแล้ว (Column G -> index 6)
+                try: 
+                    raw_names = str(row[6]) if len(row) > 6 else ""
+                    existing_names = [n.strip() for n in raw_names.split(',') if n.strip()]
+                except: existing_names = []
+                
+                break
+        
+        # --- ตรวจสอบว่าชื่อนี้เคยนับไปหรือยัง (De-duplicate) ---
+        if contract_name in existing_names:
+            print(f"Duplicate contract ignored: {contract_name}")
+            return False # ถ้านับไปแล้ว
+
+        # ถ้ายอมให้ผ่าน (ชื่อใหม่) -> เพิ่มชื่อลง list และ +1
+        existing_names.append(contract_name)
+        new_names_str = ",".join(existing_names)
+        
+        if found_row_index:
+            # อัปเดตแถวเดิม: Col F (Count) และ Col G (NameList)
+            sh.update_cell(found_row_index, 6, current_contract_count + 1)
+            sh.update_cell(found_row_index, 7, new_names_str)
+            print(f"Contract updated: {contract_name}")
+        else:
+            # สร้างแถวใหม่ (เรียง: Date, ID, Shop, Approve(0), Release(0), Contract(1), NameList)
+            sh.append_row([today_str, group_id, current_shop_name, 0, 0, 1, new_names_str])
+            print(f"New contract record: {contract_name}")
+
+        return True
+
+    except Exception as e:
+        print(f"Error recording contract: {e}")
+        return False
 
 # ==========================================
 # ฟังก์ชันแยกประเภทข้อความ (เหมือนเดิม)
@@ -149,51 +203,8 @@ def handle_file(event):
     # Sync ชื่อร้าน
     current_shop_name = sync_group_name(group_id)
 
-    try:
-        sh = get_worksheet('Log')
-        all_rows = sh.get_all_values()
-        
-        found_row_index = None
-        current_contract_count = 0
-        existing_names = []
-        
-        for i, row in enumerate(all_rows[1:]): 
-            if str(row[0]) == today_str and str(row[1]) == group_id:
-                found_row_index = i + 2
-                
-                # อ่านยอดสัญญาปัจจุบัน (Column F -> index 5)
-                try: current_contract_count = int(row[5]) if len(row) > 5 and row[5] else 0
-                except: current_contract_count = 0
-                
-                # อ่านรายชื่อคนที่เคยส่งแล้ว (Column G -> index 6)
-                try: 
-                    raw_names = str(row[6]) if len(row) > 6 else ""
-                    existing_names = [n.strip() for n in raw_names.split(',') if n.strip()]
-                except: existing_names = []
-                
-                break
-        
-        # --- ตรวจสอบว่าชื่อนี้เคยนับไปหรือยัง (De-duplicate) ---
-        if contract_name in existing_names:
-            print(f"Duplicate contract ignored: {contract_name}")
-            return # จบการทำงานทันที ถ้านับไปแล้ว
-
-        # ถ้ายอมให้ผ่าน (ชื่อใหม่) -> เพิ่มชื่อลง list และ +1
-        existing_names.append(contract_name)
-        new_names_str = ",".join(existing_names)
-        
-        if found_row_index:
-            # อัปเดตแถวเดิม: Col F (Count) และ Col G (NameList)
-            sh.update_cell(found_row_index, 6, current_contract_count + 1)
-            sh.update_cell(found_row_index, 7, new_names_str)
-            print(f"Contract updated: {contract_name}")
-        else:
-            # สร้างแถวใหม่ (เรียง: Date, ID, Shop, Approve(0), Release(0), Contract(1), NameList)
-            sh.append_row([today_str, group_id, current_shop_name, 0, 0, 1, new_names_str])
-            print(f"New contract record: {contract_name}")
-
-    except Exception as e:
-        print(f"Error handling file: {e}")
+    # เรียกใช้ฟังก์ชันบันทึกยอดสัญญา
+    record_contract_in_sheet(group_id, current_shop_name, contract_name, today_str)
 
 
 # ==========================================
@@ -208,6 +219,16 @@ def handle_message(event):
 
     group_id = event.source.group_id
     today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+    # ตรวจสอบว่าเป็นลิงก์ส่งสัญญาหรือไม่
+    if "contract_signature.php" in text and "contract_code=" in text:
+        match = re.search(r'contract_code=([^&\s]+)', text)
+        if match:
+            contract_name = match.group(1).strip()
+            current_shop_name = sync_group_name(group_id)
+            record_contract_in_sheet(group_id, current_shop_name, contract_name, today_str)
+            # ถ้านับยอดจากลิงก์เสร็จแล้วจบการทำงานทันที
+            return
 
     msg_type = classify_message(text)
 
