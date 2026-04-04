@@ -129,7 +129,8 @@ def classify_message(text):
 
     # 2. เช็คคำอนุมัติ -> คอลัมน์ D
     approve_keywords = [
-        "อนุมัติ", "อนุมัติครับ", "อนุมัติค่ะ","อนุมัต","อนมัติ"
+        "อนุมัติ", "อนุมัติครับ", "อนุมัติค่ะ","อนุมัต","อนมัติ",
+        "ทำระบบได้เลย"
     ]
     for word in approve_keywords:
         if word in text:
@@ -137,7 +138,8 @@ def classify_message(text):
 
     # 3. เช็คคำปล่อยเครื่อง -> คอลัมน์ E
     release_keywords = [
-        "ปล่อยเครื่อง", "ปล่อยได้", "ปล่อยเลย", "ปล่อยเคส", "ปล่อย", "ปล่่อย","ปลอย"
+        "ปล่อยเครื่อง", "ปล่อยได้", "ปล่อยเลย", "ปล่อยเคส", "ปล่อย", "ปล่่อย","ปลอย",
+        "รบกวนแจ้งลูกค้าก่อน", "ห้ามลูกค้าออกจาก icloud"
     ]
     for word in release_keywords:
         if word in text:
@@ -220,9 +222,19 @@ def handle_message(event):
     group_id = event.source.group_id
     today_str = datetime.date.today().strftime("%Y-%m-%d")
 
-    # ตรวจสอบว่าเป็นลิงก์ส่งสัญญาหรือไม่
+    # ตรวจสอบว่าเป็นลิงก์ส่งสัญญาหรือไม่ (แบบเก่า)
     if "contract_signature.php" in text and "contract_code=" in text:
         match = re.search(r'contract_code=([^&\s]+)', text)
+        if match:
+            contract_name = match.group(1).strip()
+            current_shop_name = sync_group_name(group_id)
+            record_contract_in_sheet(group_id, current_shop_name, contract_name, today_str)
+            # ถ้านับยอดจากลิงก์เสร็จแล้วจบการทำงานทันที
+            return
+
+    # ตรวจสอบว่าเป็นลิงก์ส่งสัญญาแบบใหม่ (M Leasing)
+    elif "m-leasing.net/sign-application/" in text:
+        match = re.search(r'sign-application/([^?\s]+)', text)
         if match:
             contract_name = match.group(1).strip()
             current_shop_name = sync_group_name(group_id)
