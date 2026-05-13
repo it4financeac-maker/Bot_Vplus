@@ -223,22 +223,8 @@ def classify_message(text):
     return None
 
 
-def build_login_reply(result, current_shop_name, login_info):
-    if result == "created":
-        return (
-            f"✅ บันทึกข้อมูลเข้าแอพของร้าน {current_shop_name} เรียบร้อย\n"
-            f"User: {login_info['username']}\n"
-            f"Link: {login_info['link']}"
-        )
-    if result == "updated":
-        return (
-            f"🔄 อัปเดตข้อมูลเข้าแอพของร้าน {current_shop_name} เรียบร้อย\n"
-            f"User: {login_info['username']}\n"
-            f"Link: {login_info['link']}"
-        )
-    if result == "unchanged":
-        return f"ℹ️ ข้อมูลเข้าแอพของร้าน {current_shop_name} เป็นข้อมูลล่าสุดอยู่แล้ว"
-    return "เกิดข้อผิดพลาดในการบันทึกข้อมูลเข้าแอพครับ"
+
+
 
 
 @app.route("/")
@@ -302,9 +288,7 @@ def handle_message(event):
 
     login_info = extract_login_info(text)
     if login_info:
-        result = upsert_shop_login_info(group_id, current_shop_name, login_info)
-        reply_text = build_login_reply(result, current_shop_name, login_info)
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        upsert_shop_login_info(group_id, current_shop_name, login_info)
         return
 
     if "contract_signature.php" in text and "contract_code=" in text:
