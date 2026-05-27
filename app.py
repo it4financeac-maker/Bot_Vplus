@@ -5,7 +5,7 @@ import re
 import gspread
 from flask import Flask, abort, request
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import FileMessage, JoinEvent, MessageEvent, TextMessage, TextSendMessage
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -385,6 +385,110 @@ def handle_message(event):
             event.reply_token,
             TextSendMessage(text="เกิดข้อผิดพลาดในการดึงข้อมูลครับ")
         )
+
+
+@app.route("/admin/sync-groups")
+def admin_sync_groups():
+    admin_token = os.environ.get("ADMIN_SYNC_TOKEN")
+    if not admin_token:
+        return "ADMIN_SYNC_TOKEN is not set", 500
+
+    token = request.args.get("token")
+    if not token or token != admin_token:
+        return "403 Forbidden", 403
+
+    try:
+        start = int(request.args.get("start", 2))
+        if start < 1:
+            start = 1
+    except ValueError:
+        start = 2
+
+    try:
+        limit = int(request.args.get("limit", 10))
+        if limit < 1:
+            limit = 10
+    except ValueError:
+        limit = 10
+
+    try:
+        sh = get_worksheet('Shops')
+        all_rows = sh.get_all_values()
+    except Exception as e:
+        return f"Error connecting to Google Sheets: {e}", 500
+
+    total_rows = len(all_rows)
+    processed_count = 0
+    checked_count = 0
+    updated_count = 0
+    skipped_count = 0
+    errors_count = 0
+    error_details = []
+
+    end_row = min(start + limit - 1, total_rows)
+
+    for row_idx in range(start, end_row + 1):
+        processed_count += 1
+        row = all_rows[row_idx - 1]
+
+        if row_idx == 1:
+            # ข้ามแถวหัวตาราง
+            skipped_count += 1
+            continue
+
+        if not row or not any(cell.strip() for cell in row):
+            # ข้ามแถวว่าง
+            skipped_count += 1
+            continue
+
+        group_id = row[0].strip()
+        if not group_id:
+            # ข้ามหากไม่มี group_id
+            skipped_count += 1
+            continue
+
+        stored_name = row[1].strip() if len(row) > 1 else ""
+
+        try:
+            summary = line_bot_api.get_group_summary(group_id)
+            current_line_name = summary.group_name
+
+            if stored_name != current_line_name:
+                sh.update_cell(row_idx, 2, current_line_name)
+                updated_count += 1
+            else:
+                checked_count += 1
+        except LineBotApiError as le:
+            errors_count += 1
+            error_details.append(f"Row {row_idx} ({group_id}): LineBotApiError: status_code={le.status_code}, message=\"{le.message}\"")
+        except Exception as e:
+            errors_count += 1
+            error_details.append(f"Row {row_idx} ({group_id}): Exception: {e}")
+
+    next_url = ""
+    if end_row < total_rows:
+        next_start = end_row + 1
+        next_url = f"/admin/sync-groups?token={token}&start={next_start}&limit={limit}"
+
+    output = []
+    output.append("Group name sync completed.")
+    output.append(f"Start row: {start}")
+    output.append(f"Limit: {limit}")
+    output.append(f"Processed: {processed_count} / {total_rows}")
+    output.append(f"Checked: {checked_count}")
+    output.append(f"Updated: {updated_count}")
+    output.append(f"Skipped: {skipped_count}")
+    output.append(f"Errors: {errors_count}")
+
+    if error_details:
+        output.append("\nError details:")
+        for detail in error_details:
+            output.append(detail)
+
+    if next_url:
+        output.append(f"\nNext URL: {next_url}")
+
+    return "\n".join(output), 200, {'Content-Type': 'text/plain; charset=utf-8'}
 
 
 if __name__ == "__main__":
